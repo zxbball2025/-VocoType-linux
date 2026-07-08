@@ -94,11 +94,11 @@ class VoCoTypeEngine(IBus.Engine):
     # Common keycodes for Numpad 0 (evdev 82, X11/Wayland 90)
     # F9 on some laptops (keycode 67)
     # Right Alt (keycodes 100, 108, 116 depending on platform)
-    PTT_KEYCODES = [67, 82, 90, 100, 108, 116]
+    PTT_KEYCODES = [67, 82, 90, 100, 105]
     # Fallback keyvals if NumLock/Layout makes it appear as digit 0
     # Also include standard F9 keysym (0xFFC6 = 65478)
     # and Right Alt keysym (0xFFEA = 65514)
-    PTT_FALLBACK_KEYVALS = [IBus.KEY_KP_0, IBus.KEY_F9, IBus.KEY_Alt_R]
+    PTT_FALLBACK_KEYVALS = [IBus.KEY_KP_0, IBus.KEY_F9, IBus.KEY_Alt_R, IBus.KEY_Control_R]
     # 调试探针：Ctrl+F9 读取 surrounding text 并回填
     SURROUNDING_PROBE_CTRL_MASK = IBus.ModifierType.CONTROL_MASK
     EDIT_HISTORY_LIMIT = 20
@@ -834,7 +834,9 @@ class VoCoTypeEngine(IBus.Engine):
         # Ctrl+F9: 语音编辑模式
         # Ctrl+Shift+F9: surrounding text 探针（保留调试能力）
         disallowed_mods = IBus.ModifierType.MOD1_MASK | IBus.ModifierType.SUPER_MASK | IBus.ModifierType.MOD4_MASK
-        ctrl_held = bool(state & self.SURROUNDING_PROBE_CTRL_MASK)
+        # 当按的就是 Ctrl 键本身（PTT 键），不算 "Ctrl 被按住"
+        is_ptt_ctrl_key = keyval in (IBus.KEY_Control_L, IBus.KEY_Control_R)
+        ctrl_held = bool(state & self.SURROUNDING_PROBE_CTRL_MASK) and not is_ptt_ctrl_key
         shift_held = bool(state & IBus.ModifierType.SHIFT_MASK)
         is_ctrl_edit = is_ptt_key and ctrl_held and not shift_held and not (state & disallowed_mods)
         is_ctrl_probe = is_ptt_key and ctrl_held and shift_held and not (state & disallowed_mods)
