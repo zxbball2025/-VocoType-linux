@@ -32,6 +32,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "pad_ms": 200,
     },
     "asr": {
+        "device": "cuda",
         "use_vad": False,
         "use_punc": True,
         "normalize_chinese_numbers": True,
@@ -53,7 +54,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "ready_wait_ms": 2000,
         "local_model": "Qwen/Qwen3.5-0.8B",
         "local_python": "",
-        "local_device": "cpu",
+        "local_device": "cuda",
         "local_dtype": "auto",
         "min_chars": 8,
         "max_tokens": 96,

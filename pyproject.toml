@@ -7,7 +7,7 @@ name = "vocotype-ibus"
 dynamic = ["version"]
 description = "Linux IBus voice input method for VoCoType"
 readme = { file = "readme.md", content-type = "text/markdown" }
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.10,<3.13"
 license = { file = "LICENSE" }
 authors = [
   { name = "VoCoType" }

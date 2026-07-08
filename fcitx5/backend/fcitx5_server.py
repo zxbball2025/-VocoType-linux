@@ -72,7 +72,12 @@ class Fcitx5Backend:
 
         # 语音识别服务
         logger.info("正在初始化 FunASR 服务器...")
-        self.asr_server = FunASRServer()
+        
+        # 从配置中获取 ASR 设备，默认为 cpu
+        asr_config = self.config.get("asr", {})
+        device = asr_config.get("device", "cpu")
+        
+        self.asr_server = FunASRServer(device=device)
         asr_result = self.asr_server.initialize()
         if not asr_result['success']:
             logger.error("FunASR 初始化失败: %s", asr_result.get('error'))

@@ -90,10 +90,15 @@ class VoCoTypeEngine(IBus.Engine):
     __gtype_name__ = 'VoCoTypeEngine'
 
     # PTT触发键
-    PTT_KEYVAL = IBus.KEY_F9
-    # Linux evdev keycode for physical F9. This keeps PTT working even when
-    # desktop firmware maps top-row F keys to media keyvals under Fn-lock.
-    PTT_FALLBACK_KEYCODE = 67
+    PTT_KEYVAL = IBus.KEY_KP_0
+    # Common keycodes for Numpad 0 (evdev 82, X11/Wayland 90)
+    # F9 on some laptops (keycode 67)
+    # Right Alt (keycodes 100, 108, 116 depending on platform)
+    PTT_KEYCODES = [67, 82, 90, 100, 108, 116]
+    # Fallback keyvals if NumLock/Layout makes it appear as digit 0
+    # Also include standard F9 keysym (0xFFC6 = 65478)
+    # and Right Alt keysym (0xFFEA = 65514)
+    PTT_FALLBACK_KEYVALS = [IBus.KEY_KP_0, IBus.KEY_F9, IBus.KEY_Alt_R]
     # 调试探针：Ctrl+F9 读取 surrounding text 并回填
     SURROUNDING_PROBE_CTRL_MASK = IBus.ModifierType.CONTROL_MASK
     EDIT_HISTORY_LIMIT = 20
@@ -611,6 +616,9 @@ class VoCoTypeEngine(IBus.Engine):
             logger.debug("enable 阶段请求 surrounding text 失败: %s", exc)
         self._log_lifecycle("enable", include_surrounding=self._supports_surrounding_text())
 
+        # 预加载 ASR 模型到 GPU，避免首次使用时等待
+        self._prewarm_asr()
+
     def do_set_capabilities(self, caps):
         """记录客户端能力（用于 surrounding text 调试输出）"""
         previous = self._client_capabilities
@@ -707,6 +715,20 @@ class VoCoTypeEngine(IBus.Engine):
         self._clear_preedit()
         self.hide_lookup_table()
 
+    def _prewarm_asr(self):
+        """后台预加载 ASR 模型到 GPU，避免首次录音时等待"""
+        cls = type(self)
+        # 如果已经加载或正在加载，跳过
+        if cls._shared_asr_ready.is_set() or cls._shared_asr_initializing:
+            return
+        logger.info("预加载 ASR 模型到 GPU...")
+        t = threading.Thread(
+            target=self._ensure_asr_ready,
+            daemon=True,
+            name="ASR-Prewarm",
+        )
+        t.start()
+
     def _ensure_asr_ready(self):
         """确保共享ASR服务器已初始化（懒加载）"""
         cls = type(self)
@@ -727,7 +749,12 @@ class VoCoTypeEngine(IBus.Engine):
             try:
                 logger.info("开始初始化FunASR（共享实例）...")
                 from app.funasr_server import FunASRServer
-                server = FunASRServer()
+                
+                # 从配置中获取 ASR 设备，默认自动检测 GPU
+                asr_config = self._runtime_config.get("asr", {})
+                device = asr_config.get("device", "cuda")
+                
+                server = FunASRServer(device=device)
                 result = server.initialize()
                 if result["success"]:
                     with cls._shared_asr_lock:
@@ -797,8 +824,12 @@ class VoCoTypeEngine(IBus.Engine):
         # 检查是否是松开事件
         is_release = bool(state & IBus.ModifierType.RELEASE_MASK)
 
-        # 处理 F9 键：优先 keyval，其次兼容物理 keycode（Fn 锁/多媒体键场景）
-        is_ptt_key = (keyval == self.PTT_KEYVAL) or (keycode == self.PTT_FALLBACK_KEYCODE)
+        # 处理 PTT 键：匹配 keyval 或 keycode
+        is_ptt_key = (keyval in self.PTT_FALLBACK_KEYVALS) or (keycode in self.PTT_KEYCODES)
+        logger.debug(
+            "PTT check: keyval=%s keycodes=%s fallbacks=%s → is_ptt_key=%s",
+            keyval, self.PTT_KEYCODES, self.PTT_FALLBACK_KEYVALS, is_ptt_key,
+        )
 
         # Ctrl+F9: 语音编辑模式
         # Ctrl+Shift+F9: surrounding text 探针（保留调试能力）

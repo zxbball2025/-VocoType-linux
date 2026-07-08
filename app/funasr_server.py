@@ -21,9 +21,7 @@ import tempfile
 warnings.filterwarnings("ignore", category=UserWarning, module="jieba._compat")
 
 # 在导入任何深度学习库之前设置环境变量
-os.environ.setdefault("OMP_NUM_THREADS", "8")  # ONNX 推理并行线程数，可提升速度
-# 默认使用 CPU 进行推理；如需使用 GPU，可在外部设置环境变量 FUNASR_DEVICE=cuda:0
-os.environ.setdefault("FUNASR_DEVICE", "cpu")
+os.environ.setdefault("OMP_NUM_THREADS", "4")  # 针对 i5-6300HQ 优化为 4 核心並行
 
 from app.funasr_config import MODEL_REVISION, MODELS
 from app.download_models import get_model_cache_path
@@ -35,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 class FunASRServer:
-    def __init__(self):
+    def __init__(self, device: str | None = None):
         self.asr_model = None
         self.vad_model = None
         self.punc_model = None
@@ -52,7 +50,7 @@ class FunASRServer:
             "punc": MODELS["punc"]["name"],
         }
 
-        self.device = self._select_device()
+        self.device = device or self._select_device()
         logger.info(
             "FunASR服务器初始化，模型版本=%s，设备=%s",
             self.model_revision,
@@ -109,11 +107,21 @@ class FunASRServer:
         sys.exit(0)
 
     def _select_device(self):
-        """自动选择推理设备"""
+        """自动选择推理设备：优先 GPU，否则 CPU"""
         env_device = os.environ.get("FUNASR_DEVICE")
         if env_device:
             logger.info("使用环境变量指定的设备: %s", env_device)
             return env_device
+
+        # 自动检测 CUDA 是否可用
+        try:
+            import torch
+            if torch.cuda.is_available():
+                device = "cuda:0"
+                logger.info("检测到 CUDA，使用 GPU 推理: %s", torch.cuda.get_device_name(0))
+                return device
+        except Exception:
+            pass
 
         return "cpu"
 
@@ -509,6 +517,7 @@ class FunASRServer:
                         logger.debug("删除VAD临时文件失败: %s", tmp_vad_path)
 
             # 提取识别文本（兼容 PyTorch 和 ONNX 两种格式）
+            raw_text = ""
             if isinstance(asr_result, list) and len(asr_result) > 0:
                 first_item = asr_result[0]
                 # PyTorch 格式: [{"text": "..."}]
@@ -523,14 +532,16 @@ class FunASRServer:
                         raw_text = str(preds)
                 else:
                     raw_text = str(first_item)
+            
+            # 只有在非空时才记录识别结果
+            if raw_text:
+                logger.info(f"ASR识别完成，原始文本: {raw_text[:100]}...")
             else:
-                raw_text = str(asr_result)
-
-            logger.info(f"ASR识别完成，原始文本: {raw_text[:100]}...")
+                logger.info("ASR识别完成，未检测到有效文本")
 
             # 使用标点恢复（ONNX 的 CT_Transformer 直接调用）
             final_text = raw_text
-            if default_options["use_punc"] and self.punc_model and raw_text.strip():
+            if default_options["use_punc"] and self.punc_model and raw_text.strip() and raw_text != "[]":
                 try:
                     # funasr_onnx.CT_Transformer 返回 (text_with_punc, punc_list)
                     punc_result = self.punc_model(raw_text)
@@ -683,6 +694,11 @@ def _build_cli_parser():
         help="动态 batch 总时长（秒），默认 60",
     )
     parser.add_argument(
+        "--device",
+        "-d",
+        help="推理设备，例如 cpu, cuda, cuda:0 等",
+    )
+    parser.add_argument(
         "--pretty",
         action="store_true",
         help="使用缩进格式输出 JSON 结果",
@@ -700,7 +716,7 @@ def main():
     parser = _build_cli_parser()
     args = parser.parse_args()
 
-    server = FunASRServer()
+    server = FunASRServer(device=args.device)
     init_result = server.initialize()
     success = init_result.get("success", False)
 

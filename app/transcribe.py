@@ -55,7 +55,11 @@ class TranscriptionWorker:
             device=audio_cfg.get("device"),
         )
 
-        self.fun_server = FunASRServer()
+        # 获取 ASR 设备，默认自动检测 GPU
+        asr_config = self.config.get("asr", {})
+        device = asr_config.get("device", "cuda")
+        
+        self.fun_server = FunASRServer(device=device)
         init_result = self.fun_server.initialize()
         if not init_result.get("success"):
             raise RuntimeError(f"FunASR 初始化失败: {init_result}")
