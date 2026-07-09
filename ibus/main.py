@@ -5,6 +5,16 @@ from __future__ import annotations
 
 import sys
 import os
+
+# 确保 onnxruntime-gpu 1.14.1 能找到兼容的 CUDA 11.x 运行时库
+# IBus 进程没有 LD_LIBRARY_PATH，会加载系统默认 CUDA 12.x/13.x，
+# 导致 CUDAExecutionProvider 初始化失败并静默回退到 CPU。
+_cuda11_path = "/usr/local/cuda-11.8/lib64"
+if os.path.isdir(_cuda11_path):
+    _existing = os.environ.get("LD_LIBRARY_PATH", "")
+    if _cuda11_path not in _existing:
+        os.environ["LD_LIBRARY_PATH"] = _cuda11_path + (":" + _existing if _existing else "")
+
 import argparse
 import logging
 from pathlib import Path
