@@ -188,10 +188,12 @@ fcitx5 -r
 ```
 VoCoType Linux
 ├── app/                    # 核心引擎（共享）
-│   ├── funasr_server.py    # 语音识别（FunASR）
+│   ├── funasr_server.py    # 语音识别（FunASR，模型加载器）
+│   ├── asr_daemon.py       # ASR 守护进程（全机唯一一份模型）
+│   ├── asr_client.py       # 守护进程客户端（RemoteASR，接口兼容 FunASRServer）
 │   └── ...
 ├── ibus/                   # IBus 版本
-│   ├── engine.py           # IBus 引擎
+│   ├── engine.py           # IBus 引擎（通过 RemoteASR 调用 daemon）
 │   └── README.md
 └── fcitx5/                 # Fcitx 5 版本
     ├── addon/              # C++ Addon
@@ -200,6 +202,115 @@ VoCoType Linux
 ```
 
 IBus 和 Fcitx 5 是**并列独立**的实现，共享 VoCoType 核心（语音识别、音频采集）。
+
+---
+
+## 共享 ASR 守护进程（推荐）
+
+为避免 GPU 显存和 CPU 内存被多份模型重复占用，FunASR 模型推荐由**守护进程**统一加载，
+所有前端（IBus / Fcitx 5 / 第三方应用如 m5stack3 语音助手）通过 Unix socket 共用同一份：
+
+```
+vocotype-asr.service（systemd 用户服务，开机登录自启）
+└─ app/asr_daemon.py  — 全机唯一一份 Paraformer-large GPU 模型
+   监听 $XDG_RUNTIME_DIR/vocotype-asr.sock
+        ↑ socket                  ↑ socket
+   IBus / Fcitx5 / m5stack3   （都是 app/asr_client.py 的 RemoteASR）
+```
+
+### 资源对比（单份模型 vs 多份独立加载）
+
+| | 每份独立加载 | 共享守护进程 |
+|---|---|---|
+| GPU 显存 | 1257 MiB × N | 1257 MiB × 1 |
+| IBus engine RSS | ~700 MB | ~160 MB |
+| 每次 STT 延迟 | 基准 | +5~15ms IPC（推理本身 100-600ms，可忽略）|
+
+### 安装
+
+```bash
+# 1. 拷贝 systemd 用户服务文件
+mkdir -p ~/.config/systemd/user
+cp /home/zxb7559/VocoType-linux/scripts/vocotype-asr.service ~/.config/systemd/user/
+
+# 2. 启用 + 立即启动（开机登录后自启）
+systemctl --user daemon-reload
+systemctl --user enable --now vocotype-asr.service
+
+# 3. 检查状态
+systemctl --user status vocotype-asr.service
+```
+
+服务文件（`vocotype-asr.service`）示例内容：
+
+```ini
+[Unit]
+Description=VocoType ASR daemon (shared FunASR Paraformer-large, GPU)
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/zxb7559/VocoType-linux
+ExecStart=/home/zxb7559/VocoType-linux/.venv/bin/python3 -m app.asr_daemon
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+```
+
+### 常用管理命令
+
+```bash
+systemctl --user status vocotype-asr.service    # 查状态
+systemctl --user restart vocotype-asr.service   # 重启（改模型/升级后）
+systemctl --user stop vocotype-asr.service      # 停止
+journalctl --user -u vocotype-asr.service -f    # 实时日志
+```
+
+日志同时写入 `logs/log_YYYY-MM-DD.log`（daemon 内部用 `app/logging_config.py`）。
+
+### 客户端（RemoteASR）用法
+
+任何 Python 进程都可以当客户端：
+
+```python
+from app.asr_client import RemoteASR, daemon_available
+
+if daemon_available():
+    server = RemoteASR()
+    result = server.initialize()
+    if result["success"]:
+        text = server.transcribe_audio("/tmp/audio.wav")["text"]
+```
+
+`RemoteASR` 的接口与 `FunASRServer` 完全兼容（`initialize` / `transcribe_audio` / `cleanup` / `device` / `transcription_count`），
+现有代码只需把 `FunASRServer(...)` 换成 `RemoteASR(...)` 即可，其他调用点零改动。
+
+IBus engine（`ibus/engine.py`）已经支持：优先连 daemon，**daemon 不可用时自动回退到本地加载**，
+所以即使 `vocotype-asr.service` 停了，输入法仍能正常用，只是要重新吃一份显存。
+
+### 重要注意事项
+
+- **用户级服务**：`systemctl --user`，**登录后**自启，注销后停。如果你需要注销也保持 daemon 跑（例如 SSH 远程使用 m5stack3），执行：
+  ```bash
+  loginctl enable-linger $USER
+  ```
+  普通桌面使用不需要。
+
+- **重启后验证**：
+  ```bash
+  systemctl --user status vocotype-asr.service  # 看 daemon 是否自启
+  nvidia-smi                                     # 应只有 daemon 一个进程占 GPU
+  ```
+
+- **Socket 路径**：默认 `$XDG_RUNTIME_DIR/vocotype-asr.sock`（即 `/run/user/<uid>/vocotype-asr.sock`，用户私有 tmpfs）。
+  可用环境变量 `VOCOTYPE_ASR_SOCKET` 覆盖。
+
+- **设备选择**：daemon 默认用 `cuda:0`，可 `Environment=VOCOTYPE_ASR_DEVICE=cpu` 强制 CPU。
+
+- **daemon 挂了 = 所有客户端 STT 都挂**：服务文件配置 `Restart=on-failure`，崩溃后 3 秒自动拉起。
+  客户端调用 `transcribe_audio` 失败时会拿到 `daemon_error`，应做降级处理。
 
 ---
 
