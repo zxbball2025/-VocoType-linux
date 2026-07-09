@@ -89,16 +89,19 @@ class VoCoTypeEngine(IBus.Engine):
 
     __gtype_name__ = 'VoCoTypeEngine'
 
-    # PTT触发键
-    PTT_KEYVAL = IBus.KEY_KP_0
-    # Common keycodes for Numpad 0 (evdev 82, X11/Wayland 90)
-    # F9 on some laptops (keycode 67)
-    # Right Alt (keycodes 100, 108, 116 depending on platform)
-    PTT_KEYCODES = [67, 82, 90, 100, 108, 116]
-    # Fallback keyvals if NumLock/Layout makes it appear as digit 0
-    # Also include standard F9 keysym (0xFFC6 = 65478)
-    # and Right Alt keysym (0xFFEA = 65514)
-    PTT_FALLBACK_KEYVALS = [IBus.KEY_KP_0, IBus.KEY_F9, IBus.KEY_Alt_R]
+    # PTT触发键（主键：F9）
+    PTT_KEYVAL = IBus.KEY_F9
+    # 物理 keycode 回退（兼容 Fn-lock 将 F9 映射为多媒体键的场景）
+    #   67  = F9     (evdev)
+    #   82  = KP_0   (evdev，部分键盘小键盘0)
+    #   100 = Alt_R  (evdev，右Alt)
+    # 注意：108 = Down（方向下键），116 = Power，不是 Alt，不应加入
+    PTT_KEYCODES = [67, 82, 100]
+    # keyval 回退：布局/NumLock 导致 keyval 变化时仍能触发
+    #   F9    = 0xFFC0 (65472)
+    #   KP_0  = 0xFFB0 (65456)
+    #   Alt_R = 0xFFEA (65514)
+    PTT_FALLBACK_KEYVALS = [IBus.KEY_F9, IBus.KEY_KP_0, IBus.KEY_Alt_R]
     # 调试探针：Ctrl+F9 读取 surrounding text 并回填
     SURROUNDING_PROBE_CTRL_MASK = IBus.ModifierType.CONTROL_MASK
     EDIT_HISTORY_LIMIT = 20
@@ -749,12 +752,20 @@ class VoCoTypeEngine(IBus.Engine):
             try:
                 logger.info("开始初始化FunASR（共享实例）...")
                 from app.funasr_server import FunASRServer
-                
+                from app.asr_client import RemoteASR, daemon_available
+
                 # 从配置中获取 ASR 设备，默认自动检测 GPU
                 asr_config = self._runtime_config.get("asr", {})
                 device = asr_config.get("device", "cuda")
-                
-                server = FunASRServer(device=device)
+
+                # 优先连接 ASR 守护进程（vocotype-asr.service），
+                # 模型只在 daemon 里加载一份；不可用时回退本地加载
+                if daemon_available():
+                    logger.info("检测到 ASR 守护进程，使用远程实例（不在本进程加载模型）")
+                    server = RemoteASR(device=device, timeout=15.0)  # IBus 场景 15 秒超时
+                else:
+                    logger.info("ASR 守护进程不可用，本进程加载模型")
+                    server = FunASRServer(device=device)
                 result = server.initialize()
                 if result["success"]:
                     with cls._shared_asr_lock:
