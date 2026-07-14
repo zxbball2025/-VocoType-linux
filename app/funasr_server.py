@@ -21,7 +21,61 @@ import tempfile
 warnings.filterwarnings("ignore", category=UserWarning, module="jieba._compat")
 
 # 在导入任何深度学习库之前设置环境变量
-os.environ.setdefault("OMP_NUM_THREADS", "4")  # 针对 i5-6300HQ 优化为 4 核心並行
+os.environ.setdefault("OMP_NUM_THREADS", "2")  # 降低线程数减少内存占用
+
+# 确保 onnxruntime-gpu 1.14.1 能找到兼容的 CUDA 11.x 库
+# IBus 进程通常没有 LD_LIBRARY_PATH，会加载系统默认 CUDA 12.x，导致 provider 初始化失败
+_cuda11_path = "/usr/local/cuda-11.8/lib64"
+if os.path.isdir(_cuda11_path):
+    _existing = os.environ.get("LD_LIBRARY_PATH", "")
+    if _cuda11_path not in _existing:
+        os.environ["LD_LIBRARY_PATH"] = _cuda11_path + (":" + _existing if _existing else "")
+
+
+def _patch_ort_execstack_if_needed():
+    """修补 onnxruntime-gpu 的 ELF GNU_STACK 段，去掉可执行标记。
+
+    旧版 onnxruntime-gpu (如 1.14.1) 的 .so 文件带有 RWE (可执行栈) 标记，
+    现代 Linux 内核 (6.x+) 会拒绝加载。在首次导入 onnxruntime 之前修补。
+    """
+    import glob as _glob
+    import struct as _struct
+
+    so_files = _glob.glob(
+        os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "..", ".venv", "lib", "python*",
+            "site-packages", "onnxruntime", "capi",
+            "onnxruntime_pybind11_state*.so",
+        )
+    )
+    for so_path in so_files:
+        try:
+            with open(so_path, "rb") as f:
+                data = bytearray(f.read())
+            if data[:4] != b"\x7fELF" or data[4] != 2:
+                continue
+            e_phoff = _struct.unpack_from("<Q", data, 32)[0]
+            e_phentsize = _struct.unpack_from("<H", data, 54)[0]
+            e_phnum = _struct.unpack_from("<H", data, 56)[0]
+            for i in range(e_phnum):
+                off = e_phoff + i * e_phentsize
+                if _struct.unpack_from("<I", data, off)[0] == 0x6474E551:  # PT_GNU_STACK
+                    flags_off = off + 4
+                    old = _struct.unpack_from("<I", data, flags_off)[0]
+                    if old & 1:  # PF_X
+                        _struct.pack_into("<I", data, flags_off, old & ~1)
+                        with open(so_path, "wb") as f:
+                            f.write(data)
+                        logging.getLogger(__name__).info(
+                            "已修补 onnxruntime ELF 可执行栈标记: %s", so_path
+                        )
+                    break
+        except Exception:
+            pass
+
+
+_patch_ort_execstack_if_needed()
 
 from app.funasr_config import MODEL_REVISION, MODELS
 from app.download_models import get_model_cache_path
@@ -75,6 +129,16 @@ class FunASRServer:
         """清理所有模型和资源"""
         logger.info("开始清理 FunASR 服务器资源")
         try:
+            # 释放持久 CUDA 显存
+            if hasattr(self, "_cuda_persistent_alloc") and self._cuda_persistent_alloc:
+                try:
+                    cuda, dptr, _ = self._cuda_persistent_alloc
+                    cuda.cuMemFree_v2(dptr)
+                    logger.debug("持久 CUDA 显存已释放")
+                except Exception:
+                    pass
+                self._cuda_persistent_alloc = None
+
             # 清理模型引用（ONNX 的 InferenceSession 会在对象销毁时自动释放）
             if self.asr_model is not None:
                 logger.debug("释放 ASR 模型")
@@ -384,7 +448,15 @@ class FunASRServer:
             
             # 预热librosa，避免首次load时的初始化延迟
             self._warmup_librosa()
-            
+
+            # 预热 CUDA：用假音频推理一次，强制分配 GPU 工作区显存并保持
+            if self.device and "cuda" in self.device:
+                self._prewarm_cuda()
+
+            # 预热后清理临时对象，减少 CPU 内存占用
+            import gc
+            gc.collect()
+
             return {
                 "success": True,
                 "message": f"FunASR模型并行初始化成功，耗时: {total_time:.2f}秒",
@@ -647,7 +719,110 @@ class FunASRServer:
                     
         except Exception as e:
             logger.warning(f"librosa预热失败（不影响使用）: {str(e)}")
-    
+
+    def _prewarm_cuda(self):
+        """用假音频推理一次，强制 CUDA 分配工作区显存并持续保持。
+
+        onnxruntime-gpu 首次推理时会分配大块 GPU workspace（数百 MiB），
+        推理结束后若不保留引用，CUDA 内存池会将其归还给系统，
+        导致 nvidia-smi 看不到进程占用。此方法通过预推理 + ctypes 分配
+        持久 CUDA buffer 来保持显存占用可见。
+        """
+        try:
+            import numpy as np
+            import soundfile as sf
+
+            logger.info("开始 CUDA 预热推理（分配 GPU 显存）...")
+            prewarm_start = time.time()
+
+            # 生成 2 秒测试音频（正弦波 + 噪声，模拟语音特征）
+            sr = 16000
+            duration = 2.0
+            t = np.linspace(0, duration, int(sr * duration), dtype=np.float32)
+            audio = (
+                np.sin(2 * np.pi * 440 * t) * 0.3
+                + np.random.randn(len(t)).astype(np.float32) * 0.01
+            )
+
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                tmp_path = f.name
+                sf.write(tmp_path, audio, sr)
+
+            try:
+                # ASR 推理
+                if self.asr_model is not None:
+                    asr_result = self.asr_model([tmp_path])
+                    # 保留引用，防止 CUDA 释放 workspace
+                    self._cuda_warmup_refs = [asr_result]
+
+                    # 标点恢复推理
+                    if self.punc_model is not None:
+                        raw_text = ""
+                        if isinstance(asr_result, list) and asr_result:
+                            first = asr_result[0]
+                            if isinstance(first, dict) and "preds" in first:
+                                preds = first["preds"]
+                                raw_text = str(preds[0]) if isinstance(preds, tuple) else str(preds)
+                            else:
+                                raw_text = str(first)
+                        if raw_text.strip():
+                            punc_result = self.punc_model(raw_text)
+                            self._cuda_warmup_refs.append(punc_result)
+            finally:
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+
+            # 通过 CUDA Driver API 分配持久 GPU buffer，保持显存可见
+            self._hold_cuda_memory()
+
+            prewarm_time = time.time() - prewarm_start
+            logger.info(f"CUDA 预热完成，耗时: {prewarm_time:.2f}秒，GPU 显存已保持")
+
+        except Exception as e:
+            logger.warning(f"CUDA 预热失败（不影响使用）: {str(e)}")
+
+    def _hold_cuda_memory(self, size_mb: int = 512):
+        """通过 CUDA Driver API 分配持久 GPU 显存，确保 nvidia-smi 可见。"""
+        try:
+            import ctypes
+            import ctypes.util
+
+            libcuda_path = ctypes.util.find_library("cuda")
+            if not libcuda_path:
+                logger.debug("未找到 libcuda，跳过显存保持")
+                return
+
+            cuda = ctypes.CDLL(libcuda_path)
+
+            # cuInit
+            if cuda.cuInit(0) != 0:
+                return
+
+            # 获取当前 CUDA context（onnxruntime 已创建）
+            ctx = ctypes.c_void_p()
+            if cuda.cuCtxGetCurrent(ctypes.byref(ctx)) != 0 or not ctx.value:
+                # 如果没有 context，创建一个新的
+                device = ctypes.c_int()
+                if cuda.cuDeviceGet(ctypes.byref(device), 0) != 0:
+                    return
+                if cuda.cuCtxCreate_v2(ctypes.byref(ctx), 0, device) != 0:
+                    return
+
+            # 分配持久显存
+            mem_bytes = size_mb * 1024 * 1024
+            dptr = ctypes.c_void_p()
+            if cuda.cuMemAlloc_v2(ctypes.byref(dptr), mem_bytes) == 0:
+                # 保存在实例上，防止被 GC 释放
+                self._cuda_persistent_alloc = (cuda, dptr, mem_bytes)
+                logger.info(f"已保持 {size_mb} MiB CUDA 显存 (ptr={dptr.value})")
+            else:
+                logger.debug("CUDA 显存分配失败")
+
+        except Exception as e:
+            logger.debug(f"CUDA 显存保持失败: {str(e)}")
+
     def _cleanup_memory(self):
         """生产环境内存清理"""
         try:

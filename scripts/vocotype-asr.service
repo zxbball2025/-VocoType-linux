@@ -1,0 +1,22 @@
+# VocoType ASR 守护进程 systemd 用户服务
+# 安装方法：
+#   cp scripts/vocotype-asr.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now vocotype-asr.service
+
+[Unit]
+Description=VocoType ASR daemon (shared FunASR Paraformer-large, GPU)
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/zxb7559/VocoType-linux
+ExecStart=/home/zxb7559/VocoType-linux/.venv/bin/python3 -m app.asr_daemon
+Restart=on-failure
+RestartSec=3
+# onnxruntime-gpu 1.14.1 需要 CUDA 11.8 库（funasr_server.py 里也有兜底，这里双保险）
+Environment=LD_LIBRARY_PATH=/usr/local/cuda-11.8/lib64
+Environment=OMP_NUM_THREADS=2
+
+[Install]
+WantedBy=default.target
