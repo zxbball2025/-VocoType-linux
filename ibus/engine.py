@@ -1918,6 +1918,14 @@ class VoCoTypeEngine(IBus.Engine):
                 # 重采样
                 audio_16k = resample_audio(audio_data, self._native_sample_rate, SAMPLE_RATE)
 
+                # Only dictation uses this gate; the shared ASR daemon stays unchanged.
+                try:
+                    from app.speaker_filter import filter_speech, SpeakerFilterError
+                    audio_16k = filter_speech(audio_16k)
+                except SpeakerFilterError as exc:
+                    GLib.idle_add(self._show_error, str(exc))
+                    return
+
                 # 写入临时文件
                 with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
                     temp_path = f.name

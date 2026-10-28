@@ -443,3 +443,8 @@ python scripts/benchmark_slm_pipeline.py ./samples \
    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=LeonardNJU/VocoType-ibus&type=date&legend=top-left" />
  </picture>
 </a>
+
+
+### IBus 本地声纹筛选
+
+IBus 在提交录音给 ASR 之前，使用本地 CAM++ 声纹向量筛选语音片段。声纹向量位于 `~/.local/share/vocotype/private/speaker-profile.bin`（不要提交或分享），模型位于 `~/helo-voice-speaker/campplus.onnx`，需要 `sherpa-onnx`。用户须先使用经过本人授权录入的声纹；缺少数据、模型出错或未匹配时不会向 ASR 提交。按约 1.5 秒窗口判定，不是多人同时说话时的声源分离；阈值和跨设备效果需要真人测试。
