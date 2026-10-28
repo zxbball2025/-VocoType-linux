@@ -12,6 +12,8 @@ VoCoType 离线语音输入法的 IBus 版本实现。
 - **轻量高效** - 纯 CPU 推理，仅需 700MB 内存
 - **快速响应** - 0.1 秒级识别速度
 
+桌面语音输入默认启用本地声纹筛选，使用 `~/.local/share/vocotype/private/speaker-profile.bin` 和本机 CAMPPlus 模型；每次按住说话的完整录音提取一个向量并判断一次，匹配后整段交给 ASR。设置 `VOCOTYPE_SPEAKER_FILTER=0` 可临时关闭。它只判断整段录音是否像已录入说话人，不会从重叠人声中分离电视声音。
+
 ## 系统要求
 
 - **Linux 发行版**: 支持 IBus 的任何发行版 (Fedora, Ubuntu, Debian, Arch 等)

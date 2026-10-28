@@ -58,22 +58,11 @@ def _matches(profile, embedding):
     return denominator > 1e-8 and float(np.dot(profile, embedding) / denominator) >= THRESHOLD
 
 def filter_speech(samples):
-    """Keep matched 1.5s windows as PCM16; reject the whole turn if none match."""
+    """Verify one complete push-to-talk utterance and return it unchanged."""
     profile = _profile()
     audio = np.asarray(samples, dtype=np.int16).reshape(-1)
     if len(audio) < RATE // 2:
         raise SpeakerFilterError('语音太短，请再说一遍')
-    out = np.zeros_like(audio)
-    step = RATE * 3 // 2
-    matched = False
-    for start in range(0, len(audio), step):
-        end = min(start + step, len(audio))
-        if end - start < RATE // 2:
-            start = max(0, end - RATE // 2)
-        part = audio[start:end]
-        if _matches(profile, _embedding(part)):
-            out[start:end] = part
-            matched = True
-    if not matched:
+    if not _matches(profile, _embedding(audio)):
         raise SpeakerFilterError('未识别到已录入的声音，请再说一遍')
-    return out
+    return audio

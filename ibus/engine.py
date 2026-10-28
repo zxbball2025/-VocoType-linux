@@ -1918,13 +1918,17 @@ class VoCoTypeEngine(IBus.Engine):
                 # 重采样
                 audio_16k = resample_audio(audio_data, self._native_sample_rate, SAMPLE_RATE)
 
-                # Only dictation uses this gate; the shared ASR daemon stays unchanged.
-                try:
-                    from app.speaker_filter import filter_speech, SpeakerFilterError
-                    audio_16k = filter_speech(audio_16k)
-                except SpeakerFilterError as exc:
-                    GLib.idle_add(self._show_error, str(exc))
-                    return
+                # Verify one complete utterance, as the Android implementation does.
+                # Set VOCOTYPE_SPEAKER_FILTER=0 to bypass it for troubleshooting.
+                if os.environ.get("VOCOTYPE_SPEAKER_FILTER", "1") == "1":
+                    try:
+                        from app.speaker_filter import filter_speech, SpeakerFilterError
+                        audio_16k = filter_speech(audio_16k)
+                        logger.info("声纹筛选完成")
+                    except SpeakerFilterError as exc:
+                        logger.warning("声纹筛选拒绝本次录音: %s", exc)
+                        GLib.idle_add(self._show_error, str(exc))
+                        return
 
                 # 写入临时文件
                 with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
